@@ -1,299 +1,298 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { PuzzleResponse } from "@/app/api/puzzle/route";
-
-type Dir = "across" | "down";
+import type { PuzzleResponse, Dir } from "@/types/puzzle";
 
 type Entry = {
-  number: number;
   dir: Dir;
-  row: number;
-  col: number;
-  startIndex: number;
-  length: number;
-  answer: string;
+  number: number;
   clue: string;
+  cells: number[];
+  answer: string;
 };
 
-const CELL_PX = 44;
+const MIN_LEN = 3;
 
-const idx = (size: number, r: number, c: number) => r * size + c;
-const rc = (size: number, i: number) => ({ r: Math.floor(i / size), c: i % size });
-const isBlackChar = (ch: string) => ch === ".";
-
-function safeCharAt(rows: string[], r: number, c: number) {
-  const row = rows[r];
-  if (!row) return ".";
-  return row[c] ?? ".";
+function idx(size: number, r: number, c: number) {
+  return r * size + c;
 }
-
-function computeNumbers(rows: string[], size: number) {
-  const numbers = Array(size * size).fill(0);
-  let n = 1;
-
-  const isBlackAt = (r: number, c: number) => isBlackChar(safeCharAt(rows, r, c));
-
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      if (isBlackAt(r, c)) continue;
-
-      const startsAcross = (c === 0 || isBlackAt(r, c - 1)) && c + 1 < size && !isBlackAt(r, c + 1);
-      const startsDown = (r === 0 || isBlackAt(r - 1, c)) && r + 1 < size && !isBlackAt(r + 1, c);
-
-      if (startsAcross || startsDown) numbers[idx(size, r, c)] = n++;
-    }
-  }
-
-  return numbers;
-}
-
-function buildEntries(puzzle: PuzzleResponse) {
-  const { size } = puzzle;
-
-  const rows = puzzle.solutionRows.map((r) => (r.length >= size ? r.slice(0, size) : r.padEnd(size, ".")));
-
-  const clueAcrossByNumber = new Map(puzzle.clues.across.map((c) => [c.number, c.clue]));
-  const clueDownByNumber = new Map(puzzle.clues.down.map((c) => [c.number, c.clue]));
-
-  const isBlackAt = (r: number, c: number) => isBlackChar(safeCharAt(rows, r, c));
-
-  const numbers = computeNumbers(rows, size);
-  const entries: Entry[] = [];
-
-  function readAcross(startR: number, startC: number) {
-    let c = startC;
-    let s = "";
-    while (c < size && !isBlackAt(startR, c)) {
-      s += safeCharAt(rows, startR, c);
-      c++;
-    }
-    return s;
-  }
-
-  function readDown(startR: number, startC: number) {
-    let r = startR;
-    let s = "";
-    while (r < size && !isBlackAt(r, startC)) {
-      s += safeCharAt(rows, r, startC);
-      r++;
-    }
-    return s;
-  }
-
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      if (isBlackAt(r, c)) continue;
-
-      const startIndex = idx(size, r, c);
-      const number = numbers[startIndex];
-      if (!number) continue;
-
-      const startsAcross = (c === 0 || isBlackAt(r, c - 1)) && c + 1 < size && !isBlackAt(r, c + 1);
-      const startsDown = (r === 0 || isBlackAt(r - 1, c)) && r + 1 < size && !isBlackAt(r + 1, c);
-
-      if (startsAcross) {
-        const answer = readAcross(r, c);
-        const clue = clueAcrossByNumber.get(number) ?? "(No clue)";
-        entries.push({ number, dir: "across", row: r, col: c, startIndex, length: answer.length, answer, clue });
-      }
-      if (startsDown) {
-        const answer = readDown(r, c);
-        const clue = clueDownByNumber.get(number) ?? "(No clue)";
-        entries.push({ number, dir: "down", row: r, col: c, startIndex, length: answer.length, answer, clue });
-      }
-    }
-  }
-
-  entries.sort((a, b) => a.number - b.number || (a.dir === "across" ? -1 : 1));
-  return { rows, numbers, entries };
-}
-
-function wordCellsFromStart(rows: string[], size: number, startIndex: number, dir: Dir) {
-  const { r, c } = rc(size, startIndex);
-  const cells: number[] = [];
-  const isBlackAt = (rr: number, cc: number) => isBlackChar(safeCharAt(rows, rr, cc));
-
-  if (dir === "across") {
-    let cc = c;
-    while (cc < size && !isBlackAt(r, cc)) {
-      cells.push(idx(size, r, cc));
-      cc++;
-    }
-  } else {
-    let rr = r;
-    while (rr < size && !isBlackAt(rr, c)) {
-      cells.push(idx(size, rr, c));
-      rr++;
-    }
-  }
-
-  return cells;
+function rc(size: number, i: number) {
+  return { r: Math.floor(i / size), c: i % size };
 }
 
 export default function CrosswordGame() {
-  const gridRef = useRef<HTMLDivElement>(null);
-
   const [puzzle, setPuzzle] = useState<PuzzleResponse | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
 
   const [fill, setFill] = useState<string[]>([]);
   const [active, setActive] = useState(0);
   const [dir, setDir] = useState<Dir>("across");
 
+  const gridRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     let cancelled = false;
 
-    async function run() {
+    async function load() {
+      setApiError(null);
+
       try {
         const res = await fetch("/api/puzzle", { cache: "no-store" });
-        if (!res.ok) throw new Error(`API error: ${res.status}`);
-        const data = (await res.json()) as PuzzleResponse;
-        if (cancelled) return;
+        const data = await res.json();
 
-        setPuzzle(data);
-
-        const size = data.size;
-        const rows = data.solutionRows.map((r) => (r.length >= size ? r.slice(0, size) : r.padEnd(size, ".")));
-
-        const initialFill: string[] = [];
-        for (let r = 0; r < size; r++) {
-          for (let c = 0; c < size; c++) {
-            initialFill.push(isBlackChar(safeCharAt(rows, r, c)) ? "#" : "");
-          }
+        if (!res.ok) {
+          const details = Array.isArray(data?.details)
+            ? "\n\n" + data.details.join("\n")
+            : "";
+          throw new Error(`${data?.error || "API error"}${details}`);
         }
 
-        setFill(initialFill);
-        const firstOpen = initialFill.findIndex((v) => v !== "#");
-        setActive(firstOpen >= 0 ? firstOpen : 0);
+        // Hard schema check (prevents undefined crashes)
+        if (
+          !data ||
+          typeof data.id !== "string" ||
+          typeof data.size !== "number" ||
+          !Array.isArray(data.solutionRows) ||
+          !data.clues ||
+          !Array.isArray(data.clues.across) ||
+          !Array.isArray(data.clues.down)
+        ) {
+          throw new Error(
+            "API returned a non-puzzle response. /api/puzzle must return { id, size, solutionRows, clues }.",
+          );
+        }
+
+        const p = data as PuzzleResponse;
+
+        if (cancelled) return;
+
+        setPuzzle(p);
+
+        // init fill
+        const nextFill: string[] = [];
+        for (let r = 0; r < p.size; r++) {
+          for (let c = 0; c < p.size; c++) {
+            const ch = p.solutionRows[r]?.[c] ?? ".";
+            nextFill.push(ch === "." ? "#" : "");
+          }
+        }
+        setFill(nextFill);
+
+        const first = nextFill.findIndex((v) => v !== "#");
+        setActive(first >= 0 ? first : 0);
         setDir("across");
       } catch (e: any) {
-        setLoadError(e?.message ?? "Failed to load puzzle");
+        if (cancelled) return;
+        setPuzzle(null);
+        setFill([]);
+        setApiError(e?.message || "Failed to load puzzle");
       }
     }
 
-    run();
+    load();
     return () => {
       cancelled = true;
     };
   }, []);
 
   const size = puzzle?.size ?? 0;
+  const solutionRows = puzzle?.solutionRows ?? [];
 
-  const { rows, numbers, entries } = useMemo(() => {
-    if (!puzzle) return { rows: [] as string[], numbers: [] as number[], entries: [] as Entry[] };
-    return buildEntries(puzzle);
-  }, [puzzle]);
+  const isBlack = (r: number, c: number) => {
+    const ch = solutionRows[r]?.[c] ?? ".";
+    return ch === ".";
+  };
 
-  const acrossEntries = useMemo(() => entries.filter((e) => e.dir === "across"), [entries]);
-  const downEntries = useMemo(() => entries.filter((e) => e.dir === "down"), [entries]);
+  const numbers = useMemo(() => {
+    if (!puzzle) return [];
+    const nums = Array.from({ length: size * size }, () => 0);
+    let n = 1;
 
-  const solutionFlat = useMemo(() => {
-    if (!puzzle) return [] as string[];
-    const out: string[] = [];
-    for (let r = 0; r < puzzle.size; r++) {
-      for (let c = 0; c < puzzle.size; c++) {
-        out.push(safeCharAt(rows, r, c));
+    const startsAcross = (r: number, c: number) => {
+      if (isBlack(r, c)) return false;
+      const leftBlack = c === 0 || isBlack(r, c - 1);
+      const hasRight = c + 1 < size && !isBlack(r, c + 1);
+      return leftBlack && hasRight;
+    };
+    const startsDown = (r: number, c: number) => {
+      if (isBlack(r, c)) return false;
+      const upBlack = r === 0 || isBlack(r - 1, c);
+      const hasDown = r + 1 < size && !isBlack(r + 1, c);
+      return upBlack && hasDown;
+    };
+
+    for (let r = 0; r < size; r++) {
+      for (let c = 0; c < size; c++) {
+        if (isBlack(r, c)) continue;
+        if (startsAcross(r, c) || startsDown(r, c)) nums[idx(size, r, c)] = n++;
       }
     }
+    return nums;
+  }, [puzzle, size, solutionRows]);
+
+  const entries = useMemo<Entry[]>(() => {
+    if (!puzzle) return [];
+
+    const acrossClue = new Map(
+      puzzle.clues.across.map((x) => [x.number, x.clue]),
+    );
+    const downClue = new Map(puzzle.clues.down.map((x) => [x.number, x.clue]));
+
+    const out: Entry[] = [];
+
+    const startsAcross = (r: number, c: number) => {
+      if (isBlack(r, c)) return false;
+      const leftBlack = c === 0 || isBlack(r, c - 1);
+      const hasRight = c + 1 < size && !isBlack(r, c + 1);
+      return leftBlack && hasRight;
+    };
+    const startsDown = (r: number, c: number) => {
+      if (isBlack(r, c)) return false;
+      const upBlack = r === 0 || isBlack(r - 1, c);
+      const hasDown = r + 1 < size && !isBlack(r + 1, c);
+      return upBlack && hasDown;
+    };
+
+    for (let r = 0; r < size; r++) {
+      for (let c = 0; c < size; c++) {
+        if (!startsAcross(r, c)) continue;
+
+        const number = numbers[idx(size, r, c)];
+        const cells: number[] = [];
+        let answer = "";
+        let cc = c;
+        while (cc < size && !isBlack(r, cc)) {
+          cells.push(idx(size, r, cc));
+          answer += solutionRows[r][cc];
+          cc++;
+        }
+        if (cells.length >= MIN_LEN) {
+          out.push({
+            dir: "across",
+            number,
+            clue: acrossClue.get(number) ?? "(No clue)",
+            cells,
+            answer,
+          });
+        }
+      }
+    }
+
+    for (let r = 0; r < size; r++) {
+      for (let c = 0; c < size; c++) {
+        if (!startsDown(r, c)) continue;
+
+        const number = numbers[idx(size, r, c)];
+        const cells: number[] = [];
+        let answer = "";
+        let rr = r;
+        while (rr < size && !isBlack(rr, c)) {
+          cells.push(idx(size, rr, c));
+          answer += solutionRows[rr][c];
+          rr++;
+        }
+        if (cells.length >= MIN_LEN) {
+          out.push({
+            dir: "down",
+            number,
+            clue: downClue.get(number) ?? "(No clue)",
+            cells,
+            answer,
+          });
+        }
+      }
+    }
+
+    out.sort((a, b) =>
+      a.dir === b.dir ? a.number - b.number : a.dir === "across" ? -1 : 1,
+    );
     return out;
-  }, [puzzle, rows]);
+  }, [puzzle, size, solutionRows, numbers]);
+
+  const acrossEntries = useMemo(
+    () => entries.filter((e) => e.dir === "across"),
+    [entries],
+  );
+  const downEntries = useMemo(
+    () => entries.filter((e) => e.dir === "down"),
+    [entries],
+  );
+
+  const activeEntry = useMemo(() => {
+    if (!puzzle || fill[active] === "#") return null;
+    return (
+      entries.find((e) => e.dir === dir && e.cells.includes(active)) ?? null
+    );
+  }, [puzzle, fill, active, dir, entries]);
+
+  const activeWordCells = useMemo(() => {
+    const set = new Set<number>();
+    if (!activeEntry) return set;
+    for (const c of activeEntry.cells) set.add(c);
+    return set;
+  }, [activeEntry]);
 
   function focusGrid() {
     gridRef.current?.focus();
   }
 
-  function findWordStartForCell(cellIndex: number, d: Dir) {
-    const { r, c } = rc(size, cellIndex);
-    const isBlackAt = (rr: number, cc: number) => isBlackChar(safeCharAt(rows, rr, cc));
-    if (isBlackAt(r, c)) return cellIndex;
-
-    if (d === "across") {
-      let cc = c;
-      while (cc > 0 && !isBlackAt(r, cc - 1)) cc--;
-      return idx(size, r, cc);
-    } else {
-      let rr = r;
-      while (rr > 0 && !isBlackAt(rr - 1, c)) rr--;
-      return idx(size, rr, c);
-    }
-  }
-
-  const activeWordStart = useMemo(() => {
-    if (!puzzle) return 0;
-    return findWordStartForCell(active, dir);
-  }, [puzzle, active, dir, rows, size]);
-
-  const activeEntry = useMemo(() => {
-    if (!puzzle) return null;
-    const list = dir === "across" ? acrossEntries : downEntries;
-    return list.find((e) => e.startIndex === activeWordStart) ?? null;
-  }, [puzzle, dir, acrossEntries, downEntries, activeWordStart]);
-
-  const activeWordCells = useMemo(() => {
-    if (!puzzle || !activeEntry) return new Set<number>();
-    return new Set(wordCellsFromStart(rows, size, activeEntry.startIndex, activeEntry.dir));
-  }, [puzzle, activeEntry, rows, size]);
-
-  function isEntrySolved(e: Entry) {
-    const cells = wordCellsFromStart(rows, size, e.startIndex, e.dir);
-    for (const i of cells) {
-      const sol = solutionFlat[i];
-      if (sol === ".") return false;
-      if (!fill[i]) return false;
-      if (fill[i] !== sol) return false;
+  function entrySolved(e: Entry) {
+    for (let i = 0; i < e.cells.length; i++) {
+      const cell = e.cells[i];
+      const typed = fill[cell];
+      const want = e.answer[i];
+      if (!typed || typed !== want) return false;
     }
     return true;
   }
 
-  function tabToNextUnsolved() {
-    if (!puzzle) return;
+  function jumpToEntry(e: Entry) {
+    setDir(e.dir);
+    setActive(e.cells[0]);
+    focusGrid();
+  }
 
-    const currentList = dir === "across" ? acrossEntries : downEntries;
-    const otherList = dir === "across" ? downEntries : acrossEntries;
+  function nextUnsolvedFrom(current: Entry | null, target: Dir) {
+    const list = target === "across" ? acrossEntries : downEntries;
+    const unsolved = list.filter((e) => !entrySolved(e));
+    if (!unsolved.length) return null;
 
-    const curStart = activeEntry?.startIndex ?? activeWordStart;
-    const curIndex = currentList.findIndex((e) => e.startIndex === curStart);
+    if (!current || current.dir !== target) return unsolved[0];
 
-    for (let i = Math.max(curIndex + 1, 0); i < currentList.length; i++) {
-      if (!isEntrySolved(currentList[i])) {
-        setDir(currentList[i].dir);
-        setActive(currentList[i].startIndex);
-        focusGrid();
-        return;
-      }
-    }
+    const i = unsolved.findIndex((e) => e.number === current.number);
+    if (i < 0) return unsolved[0];
+    return unsolved[(i + 1) % unsolved.length];
+  }
 
-    for (let i = 0; i < otherList.length; i++) {
-      if (!isEntrySolved(otherList[i])) {
-        setDir(otherList[i].dir);
-        setActive(otherList[i].startIndex);
-        focusGrid();
-        return;
-      }
-    }
+  function handleTab() {
+    const cur = activeEntry;
+    const nextAcross = nextUnsolvedFrom(cur, "across");
+    const nextDown = nextUnsolvedFrom(cur, "down");
 
-    const fallback = acrossEntries[0] ?? downEntries[0];
-    if (fallback) {
-      setDir(fallback.dir);
-      setActive(fallback.startIndex);
-      focusGrid();
+    if (dir === "across") {
+      if (nextAcross) return jumpToEntry(nextAcross);
+      if (nextDown) return jumpToEntry(nextDown);
+      return;
+    } else {
+      if (nextDown) return jumpToEntry(nextDown);
+      if (nextAcross) return jumpToEntry(nextAcross);
+      return;
     }
   }
 
   function move(dr: number, dc: number) {
     const { r, c } = rc(size, active);
-    let nr = r + dr;
-    let nc = c + dc;
+    let rr = r + dr;
+    let cc = c + dc;
 
-    while (nr >= 0 && nr < size && nc >= 0 && nc < size) {
-      const sol = safeCharAt(rows, nr, nc);
-      if (!isBlackChar(sol)) {
-        setActive(idx(size, nr, nc));
+    while (rr >= 0 && rr < size && cc >= 0 && cc < size) {
+      const ni = idx(size, rr, cc);
+      if (fill[ni] !== "#") {
+        setActive(ni);
         return;
       }
-      nr += dr;
-      nc += dc;
+      rr += dr;
+      cc += dc;
     }
   }
 
@@ -302,56 +301,68 @@ export default function CrosswordGame() {
     else move(1, 0);
   }
 
+  function stepBackward() {
+    if (dir === "across") move(0, -1);
+    else move(-1, 0);
+  }
+
   function onKeyDown(e: React.KeyboardEvent) {
     if (!puzzle) return;
+    if (fill[active] === "#") return;
 
-    if (e.key === "Tab") {
+    const k = e.key;
+
+    if (k === "Tab") {
       e.preventDefault();
-      tabToNextUnsolved();
+      handleTab();
       return;
     }
 
-    const { r, c } = rc(size, active);
-    if (isBlackChar(safeCharAt(rows, r, c))) return;
+    if (k === "Enter") {
+      e.preventDefault();
+      setDir((d) => (d === "across" ? "down" : "across"));
+      return;
+    }
 
-    if (e.key === "ArrowLeft") {
+    if (k === "ArrowLeft") {
       e.preventDefault();
       setDir("across");
       move(0, -1);
       return;
     }
-    if (e.key === "ArrowRight") {
+    if (k === "ArrowRight") {
       e.preventDefault();
       setDir("across");
       move(0, 1);
       return;
     }
-    if (e.key === "ArrowUp") {
+    if (k === "ArrowUp") {
       e.preventDefault();
       setDir("down");
       move(-1, 0);
       return;
     }
-    if (e.key === "ArrowDown") {
+    if (k === "ArrowDown") {
       e.preventDefault();
       setDir("down");
       move(1, 0);
       return;
     }
 
-    if (e.key === "Backspace") {
+    if (k === "Backspace") {
       e.preventDefault();
       setFill((prev) => {
         const next = [...prev];
-        if (next[active] !== "#") next[active] = "";
+        next[active] = "";
         return next;
       });
+      stepBackward();
       return;
     }
 
-    if (/^[a-zA-Z]$/.test(e.key)) {
+    if (/^[a-zA-Z]$/.test(k)) {
       e.preventDefault();
-      const letter = e.key.toUpperCase();
+      const letter = k.toUpperCase();
       setFill((prev) => {
         const next = [...prev];
         next[active] = letter;
@@ -363,199 +374,310 @@ export default function CrosswordGame() {
 
   function onCellClick(i: number) {
     if (!puzzle) return;
-    const { r, c } = rc(size, i);
-    if (isBlackChar(safeCharAt(rows, r, c))) return;
+    if (fill[i] === "#") return;
 
     if (i === active) setDir((d) => (d === "across" ? "down" : "across"));
     setActive(i);
     focusGrid();
   }
 
-  function resetFill() {
+  function reset() {
     if (!puzzle) return;
-    const initial: string[] = [];
+    const nextFill: string[] = [];
     for (let r = 0; r < size; r++) {
       for (let c = 0; c < size; c++) {
-        initial.push(isBlackChar(safeCharAt(rows, r, c)) ? "#" : "");
+        const ch = solutionRows[r]?.[c] ?? ".";
+        nextFill.push(ch === "." ? "#" : "");
       }
     }
-    setFill(initial);
-    const firstOpen = initial.findIndex((v) => v !== "#");
-    setActive(firstOpen >= 0 ? firstOpen : 0);
+    setFill(nextFill);
+    const first = nextFill.findIndex((v) => v !== "#");
+    setActive(first >= 0 ? first : 0);
     setDir("across");
     focusGrid();
   }
 
-  if (loadError) {
+  if (apiError) {
     return (
-      <div style={{ padding: 14, borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.35)" }}>
-        <div style={{ fontWeight: 900, marginBottom: 6 }}>Puzzle failed to load</div>
-        <div style={{ opacity: 0.9 }}>{loadError}</div>
+      <div style={pageWrap}>
+        <h1 style={title}>IGN Daily Crossword (Prototype)</h1>
+        <p style={subtitle}>
+          A themed crossword prototype. Tab jumps to the next unsolved clue.
+        </p>
+        <div style={errorBox}>
+          <div style={{ fontWeight: 900, fontSize: 18, marginBottom: 10 }}>
+            Puzzle failed to load
+          </div>
+          <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{apiError}</pre>
+        </div>
       </div>
     );
   }
 
-  if (!puzzle || fill.length === 0) {
-    return <div style={{ opacity: 0.85 }}>Loading puzzle…</div>;
+  if (!puzzle) {
+    return (
+      <div style={pageWrap}>
+        <h1 style={title}>IGN Daily Crossword (Prototype)</h1>
+        <p style={subtitle}>Loading…</p>
+      </div>
+    );
   }
 
-  const panelStyle: React.CSSProperties = {
-    border: "1px solid rgba(255,255,255,0.16)",
-    borderRadius: 14,
-    padding: 14,
-    background: "rgba(0,0,0,0.28)",
-  };
-
-  const clueRowStyle = (isActive: boolean, solved: boolean): React.CSSProperties => ({
-    padding: "8px 10px",
-    borderRadius: 10,
-    cursor: "pointer",
-    background: isActive ? "rgba(120, 90, 200, 0.22)" : "transparent",
-    outline: isActive ? "1px solid rgba(120, 90, 200, 0.35)" : "none",
-    opacity: solved ? 0.45 : 1,
-    lineHeight: 1.25,
-  });
+  const gridPx = 560;
+  const cellPx = Math.floor(gridPx / size);
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "auto 440px", gap: 26, alignItems: "start" }}>
-      {/* Grid */}
-      <div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
-          <button onClick={resetFill} style={btn}>Reset</button>
-          <div style={{ fontSize: 12, opacity: 0.8 }}>
-            <strong>Tab</strong> = next unsolved clue (Across → Down → Across)
+    <div style={pageWrap}>
+      <h1 style={title}>IGN Daily Crossword (Prototype)</h1>
+      <p style={subtitle}>
+        A themed crossword prototype. Tab jumps to the next unsolved clue.
+      </p>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: `${gridPx + 24}px 1fr`,
+          gap: 24,
+          alignItems: "start",
+        }}
+      >
+        <div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              marginBottom: 12,
+            }}
+          >
+            <button onClick={reset} style={btn}>
+              Reset
+            </button>
+            <div style={{ fontSize: 13, opacity: 0.8 }}>
+              Tab = next unsolved clue (Across → Down → Across) · Min word
+              length: {MIN_LEN}
+            </div>
           </div>
-        </div>
 
-        <div
-          ref={gridRef}
-          tabIndex={0}
-          onKeyDown={onKeyDown}
-          style={{
-            display: "grid",
-            gridTemplateColumns: `repeat(${size}, ${CELL_PX}px)`,
-            outline: "none",
-            border: "1px solid rgba(255,255,255,0.12)",
-            borderRadius: 10,
-            overflow: "hidden",
-          }}
-        >
-          {fill.map((val, i) => {
-            const { r, c } = rc(size, i);
-            const sol = safeCharAt(rows, r, c);
-            const isBlk = isBlackChar(sol);
-            const isActive = i === active;
-            const inWord = activeWordCells.has(i);
-            const num = numbers[i] ?? 0;
+          <div
+            ref={gridRef}
+            tabIndex={0}
+            onKeyDown={onKeyDown}
+            style={{
+              width: gridPx,
+              height: gridPx,
+              padding: 12,
+              borderRadius: 14,
+              border: "1px solid rgba(255,255,255,0.12)",
+              background: "rgba(0,0,0,0.25)",
+              outline: "none",
+            }}
+          >
+            <div
+              style={{
+                width: gridPx,
+                height: gridPx,
+                display: "grid",
+                gridTemplateColumns: `repeat(${size}, ${cellPx}px)`,
+                gridTemplateRows: `repeat(${size}, ${cellPx}px)`,
+                gap: 2,
+              }}
+            >
+              {fill.map((val, i) => {
+                const blk = val === "#";
+                const isActive = i === active;
+                const inWord = activeWordCells.has(i);
+                const num = numbers[i];
 
-            return (
-              <div
-                key={i}
-                onClick={() => onCellClick(i)}
-                style={{
-                  width: CELL_PX,
-                  height: CELL_PX,
-                  border: "1px solid rgba(0,0,0,0.35)",
-                  background: isBlk ? "#0f0f12" : isActive ? "#3b2d5a" : inWord ? "#eadcff" : "#fff",
-                  color: isBlk ? "#0f0f12" : "#111",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  position: "relative",
-                  fontWeight: 900,
-                  fontSize: 18,
-                  userSelect: "none",
-                  cursor: isBlk ? "default" : "pointer",
-                }}
-              >
-                {!isBlk && num ? (
-                  <span style={{ position: "absolute", top: 4, left: 6, fontSize: 10, fontWeight: 900, opacity: 0.7, lineHeight: 1 }}>
-                    {num}
-                  </span>
-                ) : null}
-                {!isBlk ? val : null}
-              </div>
-            );
-          })}
-        </div>
-
-        <div style={{ marginTop: 12, fontSize: 13, opacity: 0.95 }}>
-          {activeEntry ? (
-            <>
-              <strong>{activeEntry.dir.toUpperCase()} {activeEntry.number}:</strong> {activeEntry.clue}
-            </>
-          ) : (
-            <span style={{ opacity: 0.8 }}>Click a square to start.</span>
-          )}
-        </div>
-      </div>
-
-      {/* Clues */}
-      <div style={{ display: "grid", gap: 14 }}>
-        <div style={{ fontSize: 18, fontWeight: 900 }}>Clues</div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-          <div style={panelStyle}>
-            <div style={{ fontWeight: 900, marginBottom: 10 }}>Across</div>
-            <div style={{ display: "grid", gap: 6 }}>
-              {acrossEntries.map((e) => {
-                const isActive = activeEntry?.startIndex === e.startIndex && dir === "across";
-                const solved = isEntrySolved(e);
                 return (
                   <div
-                    key={`A-${e.number}-${e.startIndex}`}
-                    onClick={() => {
-                      setDir("across");
-                      setActive(e.startIndex);
-                      focusGrid();
+                    key={i}
+                    onClick={() => onCellClick(i)}
+                    style={{
+                      position: "relative",
+                      borderRadius: 8,
+                      border: "1px solid rgba(0,0,0,0.55)",
+                      background: blk
+                        ? "rgba(0,0,0,0.85)"
+                        : isActive
+                          ? "rgba(123,97,255,0.55)"
+                          : inWord
+                            ? "rgba(123,97,255,0.22)"
+                            : "#fff",
+                      cursor: blk ? "default" : "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontWeight: 900,
+                      fontSize: Math.max(16, Math.floor(cellPx * 0.42)),
+                      color: blk ? "transparent" : "#111",
+                      userSelect: "none",
                     }}
-                    style={clueRowStyle(isActive, solved)}
                   >
-                    <strong>{e.number}.</strong> {e.clue}
+                    {!blk && num ? (
+                      <div
+                        style={{
+                          position: "absolute",
+                          top: 4,
+                          left: 6,
+                          fontSize: 10,
+                          fontWeight: 900,
+                          opacity: 0.75,
+                          lineHeight: 1,
+                          color: "#111",
+                        }}
+                      >
+                        {num}
+                      </div>
+                    ) : null}
+                    {!blk ? val : null}
                   </div>
                 );
               })}
             </div>
           </div>
 
-          <div style={panelStyle}>
-            <div style={{ fontWeight: 900, marginBottom: 10 }}>Down</div>
-            <div style={{ display: "grid", gap: 6 }}>
-              {downEntries.map((e) => {
-                const isActive = activeEntry?.startIndex === e.startIndex && dir === "down";
-                const solved = isEntrySolved(e);
-                return (
-                  <div
-                    key={`D-${e.number}-${e.startIndex}`}
-                    onClick={() => {
-                      setDir("down");
-                      setActive(e.startIndex);
-                      focusGrid();
-                    }}
-                    style={clueRowStyle(isActive, solved)}
-                  >
-                    <strong>{e.number}.</strong> {e.clue}
-                  </div>
-                );
-              })}
-            </div>
+          <div style={{ marginTop: 10, fontSize: 13, opacity: 0.9 }}>
+            {activeEntry ? (
+              <>
+                <strong>
+                  {activeEntry.dir.toUpperCase()} {activeEntry.number}:
+                </strong>{" "}
+                {activeEntry.clue}
+              </>
+            ) : (
+              "Click a cell to start."
+            )}
           </div>
         </div>
 
-        <div style={{ fontSize: 12, opacity: 0.75 }}>
-          Tip: click the active cell again to toggle direction.
+        <div>
+          <div style={{ fontWeight: 900, fontSize: 18, marginBottom: 12 }}>
+            Clues
+          </div>
+
+          <div
+            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}
+          >
+            <CluePanel
+              title="Across"
+              entries={acrossEntries}
+              active={
+                activeEntry?.dir === "across" ? activeEntry.number : undefined
+              }
+              solved={entrySolved}
+              onPick={jumpToEntry}
+            />
+            <CluePanel
+              title="Down"
+              entries={downEntries}
+              active={
+                activeEntry?.dir === "down" ? activeEntry.number : undefined
+              }
+              solved={entrySolved}
+              onPick={jumpToEntry}
+            />
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
+function CluePanel({
+  title,
+  entries,
+  active,
+  solved,
+  onPick,
+}: {
+  title: string;
+  entries: Entry[];
+  active?: number;
+  solved: (e: Entry) => boolean;
+  onPick: (e: Entry) => void;
+}) {
+  return (
+    <div style={panel}>
+      <div style={{ fontWeight: 900, marginBottom: 10 }}>{title}</div>
+      <ol style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 8 }}>
+        {entries.map((e) => {
+          const a = e.number === active;
+          const s = solved(e);
+          return (
+            <li key={`${e.dir}-${e.number}`} value={e.number}>
+              <button
+                onClick={() => onPick(e)}
+                style={{
+                  ...clueBtn,
+                  background: a ? "rgba(123,97,255,0.22)" : "transparent",
+                  opacity: s ? 0.6 : 1,
+                }}
+              >
+                <strong>{e.number}.</strong> {e.clue}
+              </button>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
+const pageWrap: React.CSSProperties = {
+  minHeight: "100vh",
+  padding: "28px 28px 60px",
+  background:
+    "radial-gradient(1200px 600px at 20% 10%, rgba(255,255,255,0.08), transparent 60%), #050507",
+  color: "#fff",
+};
+
+const title: React.CSSProperties = {
+  margin: 0,
+  fontSize: 44,
+  letterSpacing: -0.5,
+  fontWeight: 900,
+};
+
+const subtitle: React.CSSProperties = {
+  marginTop: 10,
+  marginBottom: 22,
+  opacity: 0.85,
+};
+
 const btn: React.CSSProperties = {
-  padding: "8px 10px",
-  borderRadius: 10,
-  border: "1px solid rgba(255,255,255,0.25)",
-  background: "rgba(255,255,255,0.08)",
+  padding: "10px 14px",
+  borderRadius: 12,
+  border: "1px solid rgba(255,255,255,0.16)",
+  background: "rgba(255,255,255,0.06)",
   cursor: "pointer",
   fontWeight: 800,
   color: "#fff",
+};
+
+const panel: React.CSSProperties = {
+  borderRadius: 16,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(0,0,0,0.22)",
+  padding: 14,
+  minHeight: 560,
+};
+
+const clueBtn: React.CSSProperties = {
+  width: "100%",
+  textAlign: "left",
+  border: "none",
+  padding: "8px 10px",
+  borderRadius: 12,
+  cursor: "pointer",
+  color: "#fff",
+  background: "transparent",
+};
+
+const errorBox: React.CSSProperties = {
+  marginTop: 18,
+  padding: 18,
+  borderRadius: 16,
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(0,0,0,0.25)",
 };
